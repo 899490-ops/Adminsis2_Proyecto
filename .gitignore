@@ -7,4 +7,4 @@ __pycache__/
 *.pyo
 
 # Logs (el fichero se genera en tiempo de ejecución, no se versiona)
-logs/eventos.log
+src/servidor/logs/eventos.log

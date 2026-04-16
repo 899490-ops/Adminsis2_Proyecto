@@ -5,7 +5,8 @@ Lógica principal del cliente:
   - Envía HEARTBEAT al servidor asignado cada HEARTBEAT_INTERVAL segundos.
   - Si no recibe HEARTBEAT_ACK en HEARTBEAT_TIMEOUT segundos, cuenta un fallo.
   - Tras MAX_FALLOS consecutivos sin respuesta, declara la caída del servidor.
-  - Intenta reconectarse a otro servidor (CLI-6).
+  - Intenta reconectarse a otro servidor (CLI-6); al hacerlo informa al nuevo
+    servidor del servidor caído para que éste registre el evento en el log.
   - Si no hay servidores disponibles, para su ejecución (CLI-3).
 
 Uso:
@@ -16,10 +17,8 @@ Uso:
 
 import json
 import os
-import sys
 import time
 import argparse
-from datetime import datetime
 
 from reconexion import intentar_reconexion
 from stubs.tcp_canal import CanalTCP
@@ -38,34 +37,15 @@ def _cargar_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-def _log(ruta_log: str, evento: str, detalle: str) -> None:
-    """Escribe una línea en logs/eventos.log con el formato acordado."""
-    marca = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    linea = f"[{marca}] [{evento:<16}] {detalle}\n"
-
-    os.makedirs(os.path.dirname(ruta_log), exist_ok=True)
-    with open(ruta_log, "a", encoding="utf-8") as f:
-        f.write(linea)
-
-    print(linea, end="")
-
-
-# ---------------------------------------------------------------------------
 # Bucle principal
 # ---------------------------------------------------------------------------
 
 def ejecutar(servidor_inicial: tuple[str, int], modo_fallo: bool = False) -> None:
     config = _cargar_config()
 
-    intervalo: float   = config["HEARTBEAT_INTERVAL"]
-    timeout: float     = config["HEARTBEAT_TIMEOUT"]
-    max_fallos: int    = config["MAX_FALLOS"]
-    ruta_log: str      = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", config["LOG_PATH"])
-    )
+    intervalo: float = config["HEARTBEAT_INTERVAL"]
+    timeout: float   = config["HEARTBEAT_TIMEOUT"]
+    max_fallos: int  = config["MAX_FALLOS"]
 
     canal = CanalTCP(modo_fallo=modo_fallo, fallos_tras=max_fallos)
     servidor_actual = servidor_inicial
@@ -86,7 +66,7 @@ def ejecutar(servidor_inicial: tuple[str, int], modo_fallo: bool = False) -> Non
                 print(f"[WARN] Sin respuesta del servidor ({fallos}/{max_fallos})")
 
                 if fallos >= max_fallos:
-                    _log(ruta_log, "CAIDA_SERVIDOR", f"server_ip={ip}")
+                    print(f"[INFO] Servidor caído: {ip}. Iniciando reconexión.")
 
                     nuevo = intentar_reconexion(
                         servidor_caido=servidor_actual,
@@ -95,11 +75,10 @@ def ejecutar(servidor_inicial: tuple[str, int], modo_fallo: bool = False) -> Non
                     )
 
                     if nuevo is not None:
-                        _log(ruta_log, "RECONEXION", f"new_server_ip={nuevo[0]}")
+                        print(f"[INFO] Reconectado a nuevo servidor: {nuevo[0]}:{nuevo[1]}")
                         servidor_actual = nuevo
                         fallos = 0
                     else:
-                        _log(ruta_log, "SIN_SERVIDORES", "El cliente para su ejecucion")
                         print("[INFO] No hay servidores disponibles. Cerrando cliente.")
                         break
 

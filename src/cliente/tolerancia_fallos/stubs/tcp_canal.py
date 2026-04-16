@@ -56,7 +56,9 @@ class CanalTCP:
                 threading.Timer(0.1, lambda: self._buzón.put("HEARTBEAT_ACK")).start()
 
         elif mensaje.startswith("RECONNECT_REQUEST"):
-            # El nuevo servidor acepta la reconexión
+            # Nueva conexión TCP al nuevo servidor: resetear contador y desactivar modo fallo
+            self._enviados = 0
+            self._modo_fallo = False
             threading.Timer(0.1, lambda: self._buzón.put("RECONNECT_OK")).start()
 
     def recibir(self, timeout: float) -> str | None:

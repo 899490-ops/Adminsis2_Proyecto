@@ -19,10 +19,12 @@ Uso:
 import argparse
 import json
 import os
+import sys
 import threading
 import time
-from datetime import datetime
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from monitorizacion.logger import _log
 from stubs.tcp_escucha import EscuchaTCP
 from stubs.notificacion_admin import notificar_admin
 
@@ -37,22 +39,6 @@ def _cargar_config() -> dict:
     )
     with open(os.path.normpath(ruta), encoding="utf-8") as f:
         return json.load(f)
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-def _log(ruta_log: str, evento: str, detalle: str) -> None:
-    """Escribe una línea en logs/eventos.log con el formato acordado."""
-    marca = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    linea = f"[{marca}] [{evento:<16}] {detalle}\n"
-
-    os.makedirs(os.path.dirname(ruta_log), exist_ok=True)
-    with open(ruta_log, "a", encoding="utf-8") as f:
-        f.write(linea)
-
-    print(linea, end="")
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +124,19 @@ def ejecutar(clientes: list[str], ip_fallo: str | None = None) -> None:
                     with lock:
                         if ip_cliente in ultimo_heartbeat:
                             ultimo_heartbeat[ip_cliente] = time.monotonic()
+
+                elif mensaje.startswith("RECONNECT_REQUEST"):
+                    # El cliente informa de qué servidor le ha caído (CU3)
+                    partes = mensaje.split()
+                    ip_caido = next(
+                        (p.split("=", 1)[1] for p in partes if p.startswith("server_caido=")),
+                        None,
+                    )
+                    if ip_caido:
+                        _log(ruta_log, "CAIDA_SERVIDOR", f"server_ip={ip_caido}")
+                    _log(ruta_log, "RECONEXION", f"client_ip={ip_cliente}")
+                    with lock:
+                        ultimo_heartbeat[ip_cliente] = time.monotonic()
 
             # Si no quedan clientes activos, no hay nada que monitorizar
             with lock:

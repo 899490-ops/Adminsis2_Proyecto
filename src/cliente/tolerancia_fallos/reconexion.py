@@ -36,7 +36,7 @@ def intentar_reconexion(
     candidatos = [s for s in servidores if s != servidor_caido]
 
     for ip, puerto in candidatos:
-        canal.enviar(ip, puerto, f"RECONNECT_REQUEST client")
+        canal.enviar(ip, puerto, f"RECONNECT_REQUEST client server_caido={servidor_caido[0]}")
         respuesta = canal.recibir(timeout=heartbeat_timeout)
 
         if respuesta == "RECONNECT_OK":
