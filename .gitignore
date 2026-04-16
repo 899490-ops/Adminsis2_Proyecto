@@ -1,0 +1,10 @@
+# Claude Code
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs (el fichero se genera en tiempo de ejecución, no se versiona)
+logs/eventos.log

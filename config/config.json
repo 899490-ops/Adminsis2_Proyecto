@@ -1,0 +1,7 @@
+{
+  "HEARTBEAT_INTERVAL": 5,
+  "HEARTBEAT_TIMEOUT": 5,
+  "MAX_FALLOS": 3,
+  "PUERTO_TCP": 9000,
+  "LOG_PATH": "logs/eventos.log"
+}
