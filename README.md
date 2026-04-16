@@ -53,52 +53,6 @@ La ruta del log se obtiene desde `config.json` (`LOG_PATH`).
 
 ---
 
-### `src/servidor/tolerancia_fallos/monitor_clientes.py` — CU4 (Persona 3)
-
-Monitoriza los clientes asignados al servidor mediante heartbeats.
-Detecta caídas y notifica al administrador.
-
-**Mensajes que maneja:**
-
-| Mensaje entrante | Acción |
-|---|---|
-| `HEARTBEAT` | Actualiza timestamp del cliente |
-| `RECONNECT_REQUEST client server_caido=<ip>` | Registra caída del servidor anterior y acepta al cliente |
-
-**Uso:**
-```bash
-cd src/servidor/tolerancia_fallos
-python3 monitor_clientes.py <ip1> [<ip2> ...] [--modo-fallo <ip>]
-
-# Ejemplo — monitorizar dos clientes:
-python3 monitor_clientes.py 192.168.1.20 192.168.1.21
-
-# Ejemplo — simular caída del cliente 192.168.1.20 (prueba CU4):
-python3 monitor_clientes.py 192.168.1.20 --modo-fallo 192.168.1.20
-```
-
----
-
-### `src/cliente/tolerancia_fallos/detector_servidor.py` — CU3 (Persona 3)
-
-Envía heartbeats al servidor asignado. Si el servidor no responde tras `MAX_FALLOS`
-intentos, busca un nuevo servidor y se reconecta de forma transparente.
-Al reconectarse informa al nuevo servidor del servidor que ha caído.
-
-**Uso:**
-```bash
-cd src/cliente/tolerancia_fallos
-python3 detector_servidor.py <ip_servidor> [--modo-fallo]
-
-# Ejemplo — conectarse al servidor 192.168.1.10:
-python3 detector_servidor.py 192.168.1.10
-
-# Ejemplo — simular caída del servidor (prueba CU3):
-python3 detector_servidor.py 192.168.1.10 --modo-fallo
-```
-
----
-
 ## Protocolo de mensajes (acordado con Persona 2)
 
 | Mensaje | Dirección | Descripción |
