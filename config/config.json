@@ -3,5 +3,6 @@
   "HEARTBEAT_TIMEOUT": 5,
   "MAX_FALLOS": 3,
   "PUERTO_TCP": 9000,
+  "PUERTO_DISCOVERY": 9099,
   "LOG_PATH": "src/servidor/logs/eventos.log"
 }

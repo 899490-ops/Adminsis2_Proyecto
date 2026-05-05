@@ -6,5 +6,3 @@ __pycache__/
 # Logs (el fichero se genera en tiempo de ejecución, no se versiona)
 src/servidor/logs/*
 
-# Stubs de desarrollo local (no forman parte del sistema final)
-**/stubs/
