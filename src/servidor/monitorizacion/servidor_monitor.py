@@ -7,13 +7,15 @@ Responsabilidades:
   - Calcular la carga del servidor combinando tiempo de monitorización
     y recursos hardware disponibles.
   - Reasignar clientes a otro servidor cuando exista uno con menor carga.
+  - Detectar la caída de clientes mediante watchdog (CU4).
+  - Responder a peticiones UDP de autodiscovery (RC1 / CU1).
   - Mantener compatibilidad básica con los mensajes HEARTBEAT y
     RECONNECT_REQUEST usados por los módulos de tolerancia a fallos.
 
 Uso:
     python servidor_monitor.py --host 0.0.0.0 --puerto 9000 --id srv1
     python servidor_monitor.py --host 0.0.0.0 --puerto 9001 --id srv2 \
-        --servidores 127.0.0.1:9000 127.0.0.1:9001
+        --servidores 127.0.0.1:9000
 """
 
 from __future__ import annotations
@@ -61,6 +63,17 @@ def _ruta_carga(id_servidor: str, puerto: int) -> str:
     return os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "logs", nombre)
     )
+
+
+def _mi_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+    finally:
+        s.close()
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +160,90 @@ class EstadoMonitor:
 
 
 # ---------------------------------------------------------------------------
+# Watchdog de clientes (CU4)
+# ---------------------------------------------------------------------------
+
+def _watchdog_clientes(estado: EstadoMonitor, config: dict[str, Any]) -> None:
+    intervalo = float(config["HEARTBEAT_INTERVAL"])
+    umbral = float(config["MAX_FALLOS"]) * intervalo
+
+    while True:
+        time.sleep(intervalo)
+        ahora = time.time()
+
+        with estado.lock:
+            caidos = [
+                (cid, info["client_ip"])
+                for cid, info in list(estado.clientes.items())
+                if ahora - info["last_seen"] > umbral
+            ]
+            for cid, _ in caidos:
+                del estado.clientes[cid]
+
+        for cid, ip in caidos:
+            _log(estado.ruta_eventos, "CAIDA_CLIENTE", f"client_id={cid} client_ip={ip}")
+
+
+# ---------------------------------------------------------------------------
+# Autodiscovery UDP (RC1 / CU1 / RS1)
+# ---------------------------------------------------------------------------
+
+def _hilo_discovery(
+    ip_anuncio: str,
+    puerto_tcp: int,
+    puerto_discovery: int,
+    activo: threading.Event,
+) -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", puerto_discovery))
+    sock.settimeout(1.0)
+    respuesta = f"SERVIDOR {ip_anuncio}:{puerto_tcp}".encode("utf-8")
+    try:
+        while activo.is_set():
+            try:
+                datos, addr = sock.recvfrom(1024)
+                if datos.strip() == b"SERVIDOR_DISPONIBLE?":
+                    sock.sendto(respuesta, addr)
+            except socket.timeout:
+                continue
+    finally:
+        sock.close()
+
+
+def _descubrir_otros_servidores(
+    puerto_propio: int, puerto_discovery: int
+) -> list[tuple[str, int]]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(2.0)
+    servidores: list[tuple[str, int]] = []
+    try:
+        sock.sendto(b"SERVIDOR_DISPONIBLE?", ("255.255.255.255", puerto_discovery))
+        try:
+            sock.sendto(b"SERVIDOR_DISPONIBLE?", ("127.0.0.1", puerto_discovery))
+        except OSError:
+            pass
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                datos, _ = sock.recvfrom(1024)
+                resp = datos.decode("utf-8").strip()
+                if resp.startswith("SERVIDOR "):
+                    partes = resp.split()[1].split(":")
+                    ip, p = partes[0], int(partes[1])
+                    if p != puerto_propio and (ip, p) not in servidores:
+                        servidores.append((ip, p))
+            except socket.timeout:
+                break
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    return servidores
+
+
+# ---------------------------------------------------------------------------
 # Comunicación TCP
 # ---------------------------------------------------------------------------
 
@@ -193,6 +290,18 @@ class _Handler(socketserver.BaseRequestHandler):
 
         if mensaje.startswith("RECONNECT_REQUEST"):
             self.request.sendall(b"RECONNECT_OK")
+            partes = mensaje.split()
+            ip_caido = next(
+                (p.split("=", 1)[1] for p in partes if p.startswith("server_caido=")),
+                None,
+            )
+            ip_cliente = next(
+                (p.split("=", 1)[1] for p in partes if p.startswith("client=")),
+                self.client_address[0],
+            )
+            if ip_caido:
+                _log(estado.ruta_eventos, "CAIDA_SERVIDOR", f"server_ip={ip_caido}")
+            _log(estado.ruta_eventos, "RECONEXION", f"client_ip={ip_cliente}")
             return
 
         if mensaje == "LOAD_REQUEST":
@@ -260,6 +369,14 @@ def ejecutar(
     umbral_reasignacion: float,
 ) -> None:
     config = _cargar_config()
+    puerto_discovery = int(config.get("PUERTO_DISCOVERY", 9099))
+
+    # Si no se indicaron otros servidores, intentar autodiscovery (RS1 / CU1)
+    if not servidores:
+        servidores = _descubrir_otros_servidores(puerto, puerto_discovery)
+        if servidores:
+            print(f"[INFO] Servidores descubiertos automáticamente: {servidores}")
+
     estado = EstadoMonitor(
         id_servidor=id_servidor,
         host=host,
@@ -269,14 +386,34 @@ def ejecutar(
         umbral_reasignacion=umbral_reasignacion,
     )
 
+    ip_anuncio = _mi_ip()
+    activo_discovery = threading.Event()
+    activo_discovery.set()
+
+    hilo_disc = threading.Thread(
+        target=_hilo_discovery,
+        args=(ip_anuncio, puerto, puerto_discovery, activo_discovery),
+        daemon=True,
+    )
+    hilo_disc.start()
+
+    hilo_watchdog = threading.Thread(
+        target=_watchdog_clientes,
+        args=(estado, config),
+        daemon=True,
+    )
+    hilo_watchdog.start()
+
     with _ThreadingTCPServer((host, puerto), _Handler) as servidor:
         servidor.estado = estado  # type: ignore[attr-defined]
         print(f"[INFO] Servidor {id_servidor} escuchando en {host}:{puerto}")
+        print(f"[INFO] Discovery UDP activo en puerto {puerto_discovery}")
         try:
             servidor.serve_forever()
         except KeyboardInterrupt:
             print("\n[INFO] Servidor de monitorización detenido manualmente.")
         finally:
+            activo_discovery.clear()
             servidor.shutdown()
 
 

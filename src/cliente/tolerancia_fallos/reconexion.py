@@ -4,6 +4,7 @@ Lógica de reconexión del cliente a un nuevo servidor (CU3).
 Cuando el cliente detecta que su servidor actual ha caído, este módulo
 busca otro servidor disponible en la lista y establece una nueva conexión.
 """
+from __future__ import annotations
 
 from stubs.lista_servidores import obtener_servidores
 from stubs.tcp_canal import CanalTCP
@@ -13,6 +14,7 @@ def intentar_reconexion(
     servidor_caido: tuple[str, int],
     canal: CanalTCP,
     heartbeat_timeout: float,
+    ip_cliente: str = "",
 ) -> tuple[str, int] | None:
     """
     Intenta conectar el cliente a un servidor alternativo.
@@ -25,6 +27,8 @@ def intentar_reconexion(
         Canal de comunicación para enviar RECONNECT_REQUEST.
     heartbeat_timeout : float
         Segundos máximos de espera por respuesta del nuevo servidor.
+    ip_cliente : str
+        IP del cliente que se reconecta (incluida en el mensaje de protocolo).
 
     Retorna
     -------
@@ -36,7 +40,11 @@ def intentar_reconexion(
     candidatos = [s for s in servidores if s != servidor_caido]
 
     for ip, puerto in candidatos:
-        canal.enviar(ip, puerto, f"RECONNECT_REQUEST client server_caido={servidor_caido[0]}")
+        canal.enviar(
+            ip,
+            puerto,
+            f"RECONNECT_REQUEST client={ip_cliente} server_caido={servidor_caido[0]}",
+        )
         respuesta = canal.recibir(timeout=heartbeat_timeout)
 
         if respuesta == "RECONNECT_OK":

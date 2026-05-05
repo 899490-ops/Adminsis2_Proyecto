@@ -7,14 +7,15 @@ Lógica principal del cliente:
   - Envía periódicamente dichas métricas al servidor asignado.
   - Si el servidor responde con una reasignación, cambia al nuevo servidor
     de forma transparente y continúa enviando métricas.
-
-Requisitos cubiertos:
-  - RU-4: el cliente es monitorizado por un servidor del sistema.
-  - Base de trabajo para SRV-5, SRV-7, SRV-8 y SRV-9.
+  - Si el servidor no responde MAX_FALLOS veces consecutivas, intenta
+    conectarse a otro servidor conocido (CU3 / RC6).
+  - Si no hay ningún servidor disponible, termina su ejecución (RC3).
 
 Uso:
-    python cliente_monitor.py <ip_servidor> [--puerto 9000]
-    python cliente_monitor.py <ip_servidor> --servidores 127.0.0.1:9000 127.0.0.1:9001
+    python cliente_monitor.py [<ip_servidor>] [--puerto 9000]
+    python cliente_monitor.py --servidores 127.0.0.1:9000 127.0.0.1:9001
+
+    Sin <ip_servidor> el cliente descubre el servidor automáticamente (RC1).
 """
 
 from __future__ import annotations
@@ -197,7 +198,7 @@ def capturar_metricas(
     metricas = {
         "type": "METRICS",
         "client_id": id_cliente,
-        "client_ip": socket.gethostbyname(socket.gethostname()) if socket.gethostname() else "127.0.0.1",
+        "client_ip": _mi_ip(),
         "timestamp": round(ahora, 3),
         "bandwidth_upload_Bps": max(0.0, subida_bps),
         "system": {
@@ -233,6 +234,17 @@ def capturar_metricas(
 # Comunicación
 # ---------------------------------------------------------------------------
 
+def _mi_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+    finally:
+        s.close()
+
+
 def _enviar_mensaje(ip: str, puerto: int, payload: dict[str, Any]) -> str | None:
     mensaje = (json.dumps(payload) + "\n").encode("utf-8")
 
@@ -253,7 +265,7 @@ def _registrar_cliente(ip: str, puerto: int, id_cliente: str, servidores: list[s
     payload = {
         "type": "REGISTER",
         "client_id": id_cliente,
-        "client_ip": socket.gethostbyname(socket.gethostname()) if socket.gethostname() else "127.0.0.1",
+        "client_ip": _mi_ip(),
         "known_servers": servidores,
     }
     return _enviar_mensaje(ip, puerto, payload)
@@ -273,6 +285,63 @@ def _parsear_destino(texto: str) -> tuple[str, int] | None:
 
 
 # ---------------------------------------------------------------------------
+# Autodiscovery UDP (RC1)
+# ---------------------------------------------------------------------------
+
+def _descubrir_servidor(puerto_discovery: int, timeout: float = 3.0) -> tuple[str, int] | None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(b"SERVIDOR_DISPONIBLE?", ("255.255.255.255", puerto_discovery))
+        try:
+            sock.sendto(b"SERVIDOR_DISPONIBLE?", ("127.0.0.1", puerto_discovery))
+        except OSError:
+            pass
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                datos, _ = sock.recvfrom(1024)
+                respuesta = datos.decode("utf-8").strip()
+                if respuesta.startswith("SERVIDOR "):
+                    partes = respuesta.split()[1].split(":")
+                    return partes[0], int(partes[1])
+            except socket.timeout:
+                break
+    except OSError:
+        pass
+    finally:
+        sock.close()
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Reconexión ante fallo de métricas (CU3 / RC6)
+# ---------------------------------------------------------------------------
+
+def _buscar_servidor_alternativo(
+    servidor_caido: tuple[str, int],
+    servidores_txt: list[str],
+    puerto_default: int,
+    id_cliente: str,
+) -> tuple[str, int] | None:
+    for txt in servidores_txt:
+        partes = txt.split(":", 1)
+        try:
+            ip = partes[0].strip()
+            p = int(partes[1].strip()) if len(partes) > 1 else puerto_default
+        except ValueError:
+            continue
+        if (ip, p) == servidor_caido:
+            continue
+        resp = _registrar_cliente(ip, p, id_cliente, servidores_txt)
+        if resp == "REGISTER_OK":
+            return (ip, p)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Bucle principal
 # ---------------------------------------------------------------------------
 
@@ -282,6 +351,7 @@ def ejecutar(
     intervalo: float,
     id_cliente: str,
     servidores: list[str],
+    max_fallos: int,
 ) -> None:
     cpu_anterior = _leer_cpu_snapshot()
     tx_anterior = _tx_bytes_total()
@@ -296,6 +366,8 @@ def ejecutar(
 
     print(f"[INFO] Cliente monitorizado por {servidor_actual[0]}:{servidor_actual[1]}")
 
+    fallos_consecutivos = 0
+
     try:
         while True:
             metricas, cpu_anterior, tx_anterior, instante_anterior = capturar_metricas(
@@ -306,23 +378,43 @@ def ejecutar(
             )
 
             respuesta = _enviar_mensaje(servidor_actual[0], servidor_actual[1], metricas)
+
             if respuesta is None:
-                print("[WARN] No se ha recibido respuesta del servidor.")
+                fallos_consecutivos += 1
+                print(f"[WARN] Sin respuesta del servidor ({fallos_consecutivos}/{max_fallos})")
+
+                if fallos_consecutivos >= max_fallos:
+                    print(f"[INFO] Servidor {servidor_actual[0]} no responde. Buscando alternativa.")
+                    nuevo = _buscar_servidor_alternativo(
+                        servidor_caido=servidor_actual,
+                        servidores_txt=servidores,
+                        puerto_default=puerto,
+                        id_cliente=id_cliente,
+                    )
+                    if nuevo is not None:
+                        servidor_actual = nuevo
+                        fallos_consecutivos = 0
+                        print(f"[INFO] Cliente reasignado a {servidor_actual[0]}:{servidor_actual[1]}")
+                    else:
+                        print("[INFO] No hay servidores disponibles. Cerrando cliente.")
+                        return
+
             elif respuesta == "METRICS_OK":
-                pass
+                fallos_consecutivos = 0
+
             elif respuesta.startswith("REASSIGN"):
                 nuevo = _parsear_destino(respuesta)
                 if nuevo is not None:
                     servidor_actual = nuevo
-                    print(
-                        f"[INFO] Cliente reasignado a {servidor_actual[0]}:{servidor_actual[1]}"
-                    )
+                    fallos_consecutivos = 0
+                    print(f"[INFO] Cliente reasignado a {servidor_actual[0]}:{servidor_actual[1]}")
                     _registrar_cliente(
                         servidor_actual[0],
                         servidor_actual[1],
                         id_cliente,
                         servidores,
                     )
+
             time.sleep(intervalo)
 
     except KeyboardInterrupt:
@@ -335,7 +427,12 @@ def ejecutar(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente de monitorización (RU4)")
-    parser.add_argument("ip_servidor", help="IP del servidor inicial")
+    parser.add_argument(
+        "ip_servidor",
+        nargs="?",
+        default=None,
+        help="IP del servidor inicial (omitir para descubrimiento automático)",
+    )
     parser.add_argument(
         "--puerto",
         type=int,
@@ -363,10 +460,25 @@ if __name__ == "__main__":
 
     config = _cargar_config()
     puerto = args.puerto if args.puerto is not None else int(config["PUERTO_TCP"])
+    max_fallos = int(config["MAX_FALLOS"])
+    puerto_discovery = int(config.get("PUERTO_DISCOVERY", 9099))
+
+    ip_servidor = args.ip_servidor
+    if ip_servidor is None:
+        print("[INFO] Sin servidor indicado. Buscando servidor en la red...")
+        descubierto = _descubrir_servidor(puerto_discovery)
+        if descubierto is not None:
+            ip_servidor, puerto = descubierto
+            print(f"[INFO] Servidor encontrado: {ip_servidor}:{puerto}")
+        else:
+            print("[ERROR] No se ha encontrado ningún servidor. Cerrando cliente.")
+            sys.exit(1)
+
     ejecutar(
-        ip_servidor=args.ip_servidor,
+        ip_servidor=ip_servidor,
         puerto=puerto,
         intervalo=args.intervalo,
         id_cliente=args.id_cliente,
         servidores=args.servidores,
+        max_fallos=max_fallos,
     )

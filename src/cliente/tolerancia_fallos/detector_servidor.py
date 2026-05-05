@@ -5,22 +5,25 @@ Lógica principal del cliente:
   - Envía HEARTBEAT al servidor asignado cada HEARTBEAT_INTERVAL segundos.
   - Si no recibe HEARTBEAT_ACK en HEARTBEAT_TIMEOUT segundos, cuenta un fallo.
   - Tras MAX_FALLOS consecutivos sin respuesta, declara la caída del servidor.
-  - Intenta reconectarse a otro servidor (CLI-6); al hacerlo informa al nuevo
+  - Intenta reconectarse a otro servidor (CU3); al hacerlo informa al nuevo
     servidor del servidor caído para que éste registre el evento en el log.
-  - Si no hay servidores disponibles, para su ejecución (CLI-3).
+  - Si no hay servidores disponibles, para su ejecución (RC3).
 
 Uso:
-    python detector_servidor.py <ip_servidor> [--modo-fallo]
+    python detector_servidor.py <ip_servidor> [--servidores ip:puerto ...]
+    python detector_servidor.py <ip_servidor> --modo-fallo
 
     --modo-fallo   Activa el stub en modo fallo para probar CU3.
 """
 
+import argparse
 import json
 import os
+import socket
 import time
-import argparse
 
 from reconexion import intentar_reconexion
+from stubs.lista_servidores import guardar_servidores
 from stubs.tcp_canal import CanalTCP
 
 
@@ -36,16 +39,48 @@ def _cargar_config() -> dict:
         return json.load(f)
 
 
+def _parsear_servidores(textos: list[str]) -> list[tuple[str, int]]:
+    servidores = []
+    for texto in textos:
+        try:
+            ip, puerto_txt = texto.split(":", 1)
+            servidores.append((ip.strip(), int(puerto_txt.strip())))
+        except ValueError:
+            continue
+    return servidores
+
+
+def _mi_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+    finally:
+        s.close()
+
+
 # ---------------------------------------------------------------------------
 # Bucle principal
 # ---------------------------------------------------------------------------
 
-def ejecutar(servidor_inicial: tuple[str, int], modo_fallo: bool = False) -> None:
+def ejecutar(
+    servidor_inicial: tuple[str, int],
+    servidores_conocidos: list[tuple[str, int]],
+    modo_fallo: bool = False,
+) -> None:
     config = _cargar_config()
 
     intervalo: float = config["HEARTBEAT_INTERVAL"]
     timeout: float   = config["HEARTBEAT_TIMEOUT"]
     max_fallos: int  = config["MAX_FALLOS"]
+
+    ip_cliente = _mi_ip()
+
+    # Persiste la lista completa de servidores para que reconexion.py la lea
+    todos = list({servidor_inicial} | set(servidores_conocidos))
+    guardar_servidores(todos)
 
     canal = CanalTCP(modo_fallo=modo_fallo, fallos_tras=max_fallos)
     servidor_actual = servidor_inicial
@@ -72,6 +107,7 @@ def ejecutar(servidor_inicial: tuple[str, int], modo_fallo: bool = False) -> Non
                         servidor_caido=servidor_actual,
                         canal=canal,
                         heartbeat_timeout=timeout,
+                        ip_cliente=ip_cliente,
                     )
 
                     if nuevo is not None:
@@ -98,6 +134,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Detector de caída de servidor (CU3)")
     parser.add_argument("ip_servidor", help="IP del servidor inicial")
     parser.add_argument(
+        "--servidores",
+        nargs="*",
+        default=[],
+        help="Servidores adicionales conocidos en formato ip:puerto",
+    )
+    parser.add_argument(
         "--modo-fallo",
         action="store_true",
         help="Activa el stub en modo fallo para probar la detección de caída",
@@ -105,5 +147,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = _cargar_config()
-    servidor = (args.ip_servidor, config["PUERTO_TCP"])
-    ejecutar(servidor, modo_fallo=args.modo_fallo)
+    puerto = int(config["PUERTO_TCP"])
+    servidor = (args.ip_servidor, puerto)
+    extras = _parsear_servidores(args.servidores)
+
+    ejecutar(servidor, servidores_conocidos=extras, modo_fallo=args.modo_fallo)
